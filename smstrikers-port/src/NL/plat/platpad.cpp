@@ -1,5 +1,6 @@
 #include "NL/platpad.h"
 #include "port/overlay.h"
+#include "port/input.h"   // PORT: STRIKERS_LOG_INPUT anchors its lines to the port frame counter
 #include <stdlib.h>
 #include "dolphin/os.h"
 
@@ -38,6 +39,15 @@ static inline void UpdateButtonStateTime(PadStatus* pPadStatus, int padIdx, floa
         }
         button <<= 1;
     }
+}
+
+// PORT: STRIKERS_LOG_INPUT prints the pad's edge state after every resample. Like STRIKERS_LOG_POPUP
+// it is diagnostic only; it exists so a press the front end ignores can be told apart from one the
+// port never turned into a just-pressed edge.
+static bool log_input_enabled()
+{
+    static const int s_enabled = (getenv("STRIKERS_LOG_INPUT") != NULL) ? 1 : 0;
+    return s_enabled == 1;
 }
 } // namespace
 
@@ -403,6 +413,18 @@ void PadStatus::Update(float dt)
         }
     }
 
+    if (log_input_enabled())
+    {
+        OSReport("[pad] f=%lu cat=%d err=%d,%d,%d,%d cur=0x%04x,0x%04x,0x%04x,0x%04x prev0=0x%04x jp0=0x%04x jr0=0x%04x\n",
+                 PortInputFrame(), padStatus == &padCategories[1] ? 1 : 0,
+                 (int)PadStatus::s_Current[0].err, (int)PadStatus::s_Current[1].err,
+                 (int)PadStatus::s_Current[2].err, (int)PadStatus::s_Current[3].err,
+                 (unsigned)PadStatus::s_Current[0].button, (unsigned)PadStatus::s_Current[1].button,
+                 (unsigned)PadStatus::s_Current[2].button, (unsigned)PadStatus::s_Current[3].button,
+                 (unsigned)m_previousButtons[0], (unsigned)m_justPressed[0],
+                 (unsigned)m_justReleased[0]);
+    }
+
     if (resetMask)
     {
         PADReset(resetMask);
@@ -465,4 +487,40 @@ void UseDefaultPad()
 void UseFixedUpdatePad()
 {
     padStatus = &padCategories[1];
+}
+
+// PORT: what the engine's own pad holds, for a host that has to tell "my overlay drew the control"
+// apart from "the game read it". PadStatus::s_Current is the sample cPlatPad::IsPressed and the rest
+// of cPlatPad read, and VBlankPadUpdate swaps it in once a frame after PADRead has merged a host's
+// offer, the port's synthetic pad and any recording into it -- so this is the same bytes the game's
+// tasks act on, not a second opinion about them.
+extern "C" int PortPadEngineRead(unsigned int port, PortPadEngineState* out)
+{
+    if (out == NULL)
+        return 0;
+
+    // Written out rather than zeroed with memset: this struct is the whole of the answer, and a
+    // field skipped here is a field a host reads as a stale value.
+    out->err = 0;
+    out->buttons = 0;
+    out->stickX = 0;
+    out->stickY = 0;
+    out->substickX = 0;
+    out->substickY = 0;
+    out->triggerLeft = 0;
+    out->triggerRight = 0;
+
+    if (port >= 4)
+        return 0;
+
+    const PADStatus& pad = PadStatus::s_Current[port];
+    out->err = (int)pad.err;
+    out->buttons = (unsigned int)pad.button;
+    out->stickX = (int)pad.stickX;
+    out->stickY = (int)pad.stickY;
+    out->substickX = (int)pad.substickX;
+    out->substickY = (int)pad.substickY;
+    out->triggerLeft = (int)pad.triggerLeft;
+    out->triggerRight = (int)pad.triggerRight;
+    return 1;
 }

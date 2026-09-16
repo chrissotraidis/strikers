@@ -7,6 +7,15 @@ extern "C" {
 #endif
 float PortTargetAspect(void);
 
+// Pin the display aspect at runtime, or restore following the window with a value <= 0. A host
+// interface's own aspect control calls this; it bumps PortAspectGeneration, which main()'s frame
+// loop turns into PortApplyAspectChange and a frame-buffer resize on the next frame, so the game's
+// render mode, locked aspect and front end all move together rather than only the picture's shape.
+void PortSetTargetAspect(float aspect);
+
+// Non-zero while the aspect is the window's own rather than a pinned value.
+int PortAspectFollowsWindow(void);
+
 // The width of the logical framebuffer, in the coordinate space the game's GXSetViewport,
 // GXSetScissor and 2D orthographic projections all use. 640 at 4:3, 854 at 16:9.
 unsigned int PortLogicalFrameWidth(void);

@@ -11,7 +11,9 @@ extern unsigned char g_bScriptQuestionCachingUseSTD;
 
 // PORT: uintptr_t keys, the key is two pointers summed, and is 32 bits on Windows otherwise.
 typedef std::pair<const uintptr_t, FuzzyVariant> ScriptCachePair;
-typedef std::map<uintptr_t, FuzzyVariant, std::less<uintptr_t>, std::allocator<ScriptCachePair> > ScriptCacheMap;
+// PORT: std::msl_port::less, not std::less: see the note in MSL_Common/msl_tree.h. Empty, so the
+// map's layout is the one the decomp's member offsets describe.
+typedef std::map<uintptr_t, FuzzyVariant, std::msl_port::less<uintptr_t>, std::allocator<ScriptCachePair> > ScriptCacheMap;
 typedef std::__tree<ScriptCachePair, ScriptCacheMap::value_compare, std::allocator<ScriptCachePair> > ScriptCacheTree;
 
 class ScriptQuestionCache : public nlSingleton<ScriptQuestionCache>

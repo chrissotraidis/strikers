@@ -30,6 +30,16 @@ double PortBenchElapsed(void);
 // recorded, keeping loading spikes out of the tail, and the run clock restarts here.
 void PortBenchMatchActive(void);
 
+// The eGameState the frame being recorded belongs to, as the game itself reports it: 0 pre-game,
+// 1 kickoff, 2 post-goal, 3 end of game, 4 gameplay, 5 overtime.
+//
+// Recorded per frame rather than derived afterwards, because the segments doc 34 asks a run to
+// report separately -- active gameplay on one side, the goal/replay/transition stretches on the
+// other -- are decided by that state and by nothing a clock can be asked about later. A frame
+// carries the state the simulation last set, which is the state that decided how the frame was
+// built.
+void PortBenchPhase(int state);
+
 void PortBenchFrameBegin(void);
 void PortBenchAfterTasks(void);
 void PortBenchFrameEnd(void);
@@ -50,7 +60,7 @@ typedef struct PortBenchLive
 {
     double busyMs;        // most recent frame
     double presentMs;
-    double frameMs;
+    double frameMs;       // most recent interval between two presented frames; fps is its reciprocal
     double sleepMs;
     double busyP95Ms;     // over the rolling window
     double fps;           // over the rolling window

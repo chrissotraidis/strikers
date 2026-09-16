@@ -1,14 +1,29 @@
 // What the keyboard and a gamepad are bound to, and where a person changes it.
 
+// Hoisted out of the Aurora branch below: input.h is plain C, and the stubs for it are written
+// there too, so the two spellings of this file's surface cannot drift apart.
+#include "port/input.h"
+
 // Everything below needs Aurora.
 #if !defined(PORT_USE_AURORA)
 
 extern "C" void PortInstallKeyboardBindings(void) {}
 extern "C" void PortNoteSceneEntered(int scene) { (void)scene; }
 extern "C" void PortUpdateSyntheticInput(unsigned long frame) { (void)frame; }
+extern "C" int PortPadMapping(unsigned int port, const PortPadRow** rows)
+{
+    (void)port;
+    if (rows != NULL)
+        *rows = NULL;
+    return 0;
+}
+extern "C" const char* PortPadName(unsigned int port) { (void)port; return NULL; }
+extern "C" const char* PortPadDetail(unsigned int port) { (void)port; return NULL; }
 
 #else
 
+#include <cstdarg>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
@@ -21,7 +36,25 @@ extern "C" void PortUpdateSyntheticInput(unsigned long frame) { (void)frame; }
 
 #include "dolphin/os.h"
 #include "dolphin/pad.h"
+#include "port/hostui.h"
 #include "port/input.h"
+
+// The pad bits in port/hostui.h are a second spelling of the engine's, so that a host can
+// translate its own layout without including a Dolphin header. These assertions are what keep that
+// spelling honest: if Aurora's pad bits move, this file stops compiling instead of an app silently
+// pressing the wrong button.
+static_assert(PORT_PAD_BUTTON_LEFT == PAD_BUTTON_LEFT, "port host pad: left");
+static_assert(PORT_PAD_BUTTON_RIGHT == PAD_BUTTON_RIGHT, "port host pad: right");
+static_assert(PORT_PAD_BUTTON_DOWN == PAD_BUTTON_DOWN, "port host pad: down");
+static_assert(PORT_PAD_BUTTON_UP == PAD_BUTTON_UP, "port host pad: up");
+static_assert(PORT_PAD_TRIGGER_Z == PAD_TRIGGER_Z, "port host pad: z");
+static_assert(PORT_PAD_TRIGGER_R == PAD_TRIGGER_R, "port host pad: r");
+static_assert(PORT_PAD_TRIGGER_L == PAD_TRIGGER_L, "port host pad: l");
+static_assert(PORT_PAD_BUTTON_A == PAD_BUTTON_A, "port host pad: a");
+static_assert(PORT_PAD_BUTTON_B == PAD_BUTTON_B, "port host pad: b");
+static_assert(PORT_PAD_BUTTON_X == PAD_BUTTON_X, "port host pad: x");
+static_assert(PORT_PAD_BUTTON_Y == PAD_BUTTON_Y, "port host pad: y");
+static_assert(PORT_PAD_BUTTON_START == PAD_BUTTON_START, "port host pad: start");
 
 namespace
 {
@@ -394,6 +427,111 @@ void report_gamepad(u32 port)
     else
         OSReport("[port] input:   rumble not adjustable on this device\n");
 }
+
+// The map a host interface shows, in the terms the report above prints it. Aurora owns the
+// strings; the only thing built here is an axis's sign, which the report writes as a prefix.
+static PortPadRow s_padRows[32];
+static char s_padRowNative[32][48];
+static char s_padDetail[256];
+
+static void pad_detail_append(size_t* used, const char* format, ...)
+{
+    const size_t cap = sizeof s_padDetail;
+    if (*used >= cap)
+        return;
+    va_list arguments;
+    va_start(arguments, format);
+    const int wrote = vsnprintf(s_padDetail + *used, cap - *used, format, arguments);
+    va_end(arguments);
+    if (wrote <= 0)
+        return;
+    *used += ((size_t)wrote < cap - *used) ? (size_t)wrote : (cap - *used);
+}
+
+}   // namespace
+
+// The three below are the port's C surface for a host interface (include/port/input.h), so they
+// sit outside the unnamed namespace rather than beside the map they read: a name in an unnamed
+// namespace has internal linkage however it is declared, which keeps the C names out of the link
+// and lets a function nothing in this file calls be dropped before it reaches the object file.
+// The namespace is reopened below, which continues the same unnamed namespace.
+
+int PortPadMapping(unsigned int port, const PortPadRow** rows)
+{
+    if (rows != NULL)
+        *rows = NULL;
+
+    u32 buttonCount = 0;
+    const PADButtonMapping* buttons = PADGetButtonMappings(port, &buttonCount);
+    if (buttons == nullptr)
+        return 0;   // an empty port is also how the caller learns there is no map to show
+
+    const unsigned cap = (unsigned)(sizeof s_padRows / sizeof s_padRows[0]);
+    unsigned n = 0;
+    for (u32 i = 0; i < buttonCount && n < cap; i++)
+    {
+        const char* native = buttons[i].nativeButton == PAD_NATIVE_BUTTON_INVALID
+                                 ? "(trigger axis)"
+                                 : PADGetNativeButtonName(buttons[i].nativeButton);
+        s_padRows[n].pad = PADGetButtonName(buttons[i].padButton);
+        s_padRows[n].native = native != nullptr ? native : "(none)";
+        n++;
+    }
+
+    u32 axisCount = 0;
+    const PADAxisMapping* axes = PADGetAxisMappings(port, &axisCount);
+    for (u32 i = 0; axes != nullptr && i < axisCount && n < cap; i++)
+    {
+        const char* native = PADGetNativeAxisName(axes[i].nativeAxis);
+        snprintf(s_padRowNative[n], sizeof s_padRowNative[n], "%s%s",
+                 axes[i].nativeAxis.sign == AXIS_SIGN_NEGATIVE ? "-" : "+",
+                 native != nullptr ? native : "(none)");
+        s_padRows[n].pad = PADGetAxisName(axes[i].padAxis);
+        s_padRows[n].native = s_padRowNative[n];
+        n++;
+    }
+
+    if (rows != NULL)
+        *rows = s_padRows;
+    return (int)n;
+}
+
+const char* PortPadName(unsigned int port)
+{
+    u32 count = 0;
+    if (PADGetButtonMappings(port, &count) == nullptr)
+        return NULL;
+    const char* name = PADGetName(port);
+    return name != nullptr ? name : "controller";
+}
+
+const char* PortPadDetail(unsigned int port)
+{
+    u32 count = 0;
+    if (PADGetButtonMappings(port, &count) == nullptr)
+        return NULL;
+
+    s_padDetail[0] = '\0';
+    size_t used = 0;
+    if (const PADDeadZones* dz = PADGetDeadZones(port))
+        pad_detail_append(&used, "dead zone %.2f main / %.2f c-stick%s; trigger %.2f%s",
+                          (double)dz->stickDeadZone / 32767.0,
+                          (double)dz->substickDeadZone / 32767.0,
+                          dz->useDeadzones ? "" : " (off)",
+                          (double)dz->leftTriggerActivationZone / 32767.0,
+                          dz->emulateTriggers ? "" : " (digital)");
+
+    u16 low = 0, high = 0;
+    if (PADGetRumbleIntensity(port, &low, &high))
+        pad_detail_append(&used, "; rumble %u%%",
+                          (unsigned)((low * 100u + 32767u) / 65535u));
+    else
+        pad_detail_append(&used, "; rumble not adjustable on this device");
+    return s_padDetail;
+}
+
+namespace
+{
 
 // A typo in a pad_* value is reported whether or not a controller is plugged in: the person who
 // mistyped it is the one without a working pad.
@@ -966,11 +1104,29 @@ void record_pad(unsigned long frame)
     s_haveLastRecorded = true;
 }
 
+// Aurora's own rule for combining a virtual pad with a physical one (merge_virtual_status in
+// extern/aurora/lib/dolphin/pad/pad.cpp): the axis with the larger magnitude wins. Using the same
+// rule here keeps a host's touch stick and the port's synthetic stick from cancelling each other
+// out and centring the stick while both are pushed.
+int dominant_axis(int a, int b)
+{
+    return std::abs(b) > std::abs(a) ? b : a;
+}
+
 }   // namespace
 
 extern "C" void PortUpdateSyntheticInput(unsigned long frame)
 {
     s_currentFrame = frame;
+
+    // The host application's own interface is polled here, once per frame, at the top of the frame
+    // in which its input is used. Two consequences are deliberate: the host's pad joins the
+    // synthetic pad below instead of replacing it, and the poll happens even when a recording is
+    // about to take over, because a source whose edges are cleared on read would otherwise carry a
+    // press into a later frame. A recording is still a complete description of the input, so its
+    // result is read and then deliberately dropped.
+    PortHostPad hostPad;
+    const bool haveHostPad = PortHostUIPollPad(&hostPad) != 0;
 
     // A controller can arrive at any time, and its mapping is Aurora's until the file's is put over
     // it.
@@ -1018,6 +1174,23 @@ extern "C" void PortUpdateSyntheticInput(unsigned long frame)
         s_menuStickFrames--;
     }
     held |= fake_key_state(frame, &lx, &ly, &rx, &ry, &tl, &tr);
+
+    // The host's contribution, merged with Aurora's own virtual-pad rules rather than assigned
+    // over the top of them: buttons are OR'ed, the stronger axis reading wins, a trigger keeps the
+    // larger pressure. The clamps below then hold whatever the two of them produced to the pad's
+    // range.
+    if (haveHostPad)
+    {
+        held |= (PADButton)hostPad.buttons;
+        lx = dominant_axis(lx, hostPad.stickX);
+        ly = dominant_axis(ly, hostPad.stickY);
+        rx = dominant_axis(rx, hostPad.substickX);
+        ry = dominant_axis(ry, hostPad.substickY);
+        if (hostPad.triggerLeft > tl)
+            tl = hostPad.triggerLeft;
+        if (hostPad.triggerRight > tr)
+            tr = hostPad.triggerRight;
+    }
 
     if (held == 0 && lx == 0 && ly == 0 && rx == 0 && ry == 0 && tl == 0 && tr == 0)
     {

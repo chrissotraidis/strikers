@@ -24,7 +24,8 @@ typedef void (*VIRetraceCallback)(u32 retraceCount);
 #define PORT_FALLBACK_FRAME_NS 8333333ull
 
 // How far above the display's refresh rate the limiter sits while vsync is also pacing, so the two
-// never fight over which one ends the frame.
+// never fight over which one ends the frame. It is capped at the NTSC field below: the margin is
+// about which pacer ends a frame, and how fast the game itself runs is not the margin's to change.
 #define PORT_VSYNC_HEADROOM 1.05
 
 static VIRetraceCallback s_pre_cb;
@@ -86,11 +87,28 @@ static u64 frame_period_ns(void)
         }
         else if (s_displayHz > 0.0)
         {
-            const double hz = s_displayVsync
-                                  ? s_displayHz * PORT_VSYNC_HEADROOM
-                                  : s_displayHz;
+            // This period is the game's clock, not just the renderer's pace: VIWaitForRetrace
+            // waits for it and then advances s_retrace_count, and nothing in the tree decouples
+            // the two, so one loop of this period is one game frame of game time. The game is
+            // authored for the NTSC field, so a rate above VI_FIELD_NS does not buy frames -- it
+            // buys speed. The audio transport is drained in real time, 5 ms of audio a tick, and
+            // cannot follow a clock that is running fast: game time pulls ahead of the device,
+            // and every voice lands further behind the model that speaks it than the one before.
+            const double fieldHz = 1000000000.0 / (double)VI_FIELD_NS;
+            double hz = s_displayVsync ? s_displayHz * PORT_VSYNC_HEADROOM : s_displayHz;
+            if (hz > fieldHz)
+            {
+                // A display that can carry the field rate gets the field rate, margin and all.
+                // Only a display below it keeps the margin, where it costs speed the panel
+                // cannot give back either way.
+                hz = fieldHz;
+                why = "display, capped at the field";
+            }
+            else
+            {
+                why = s_displayVsync ? "display, +5% for vsync" : "display";
+            }
             s_period = (u64)(1000000000.0 / hz);
-            why = s_displayVsync ? "display, +5% for vsync" : "display";
         }
         else
         {

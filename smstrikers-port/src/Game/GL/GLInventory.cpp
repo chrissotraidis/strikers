@@ -26,7 +26,13 @@ GLInventory glInventory;
  */
 GLInventory::~GLInventory()
 {
-    Delete();
+    // PORT: Delete() walks the per-level containers and their trees, and Create() is what builds
+    // them. A process that ends before the renderer is up -- no disc, a host whose importer has not
+    // run yet, a bad backend name -- still runs this destructor, and unguarded it segfaults in
+    // ReleaseLevel() on a null container instead of exiting with its own status. m_bCreated is the
+    // flag Create() and Delete() already keep for exactly this question.
+    if (m_bCreated)
+        Delete();
 }
 
 /**
