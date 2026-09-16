@@ -1,3 +1,4 @@
+#include "port/hostui.h"
 // The debug overlay and menu. See include/port/overlay.h for why it is ImGui, where it is drawn,
 // and why game state is pushed here rather than pulled.
 
@@ -397,6 +398,12 @@ int PortOverlayEnabled(void)
 
 void PortOverlaySetScene(const char* name)
 {
+    if (name != nullptr && std::strcmp(s_scene, name) != 0)
+    {
+        char message[160];
+        std::snprintf(message, sizeof message, "scene %s -> %s", s_scene, name);
+        PortHostUIDiagnostic(message);
+    }
     copy_into(s_scene, sizeof(s_scene), name);
     // The label carries the number first (BaseGameSceneManager formats it), and it is parsed with
     // the format rather than by each reader of it.
@@ -408,6 +415,12 @@ const char* PortOverlaySceneName(void) { return s_scene; }
 int PortOverlaySceneNumber(void) { return s_sceneNumber; }
 void PortOverlaySetStadium(const char* name)
 {
+    if (name != nullptr && std::strcmp(s_stadium, name) != 0)
+    {
+        char message[160];
+        std::snprintf(message, sizeof message, "stadium %s -> %s", s_stadium, name);
+        PortHostUIDiagnostic(message);
+    }
     copy_into(s_stadium, sizeof(s_stadium), name);
     // The summary needs this as much as the overlay does, and for a better reason: it is what says
     // whether two runs measured the same content.

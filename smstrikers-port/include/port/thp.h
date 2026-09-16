@@ -14,6 +14,7 @@ s32 port_thp_video_decode(const void* frame, u32 size, void* tileY, void* tileU,
                           void* tileV);
 int port_thp_frame_due(float frameRate);
 void port_thp_frame_shown(void);
+void port_thp_log_open(const char* name, u32 width, u32 height, float fps, u32 frames);
 
 #ifdef __cplusplus
 }

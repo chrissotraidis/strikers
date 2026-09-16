@@ -6,6 +6,7 @@
 // interface is a property of the host and never of the platform.
 
 #include "port/hostui.h"
+#include <stdio.h>
 
 // These must lose to a host's own definitions; a strong symbol beats a weak one, and
 // `weak_definition` on Mach-O and `weak` on ELF are the same declaration in clang.
@@ -56,4 +57,9 @@ PORT_WEAK int PortHostUIRunGameDataImport(const char* title, const char* message
     (void)title;
     (void)message;
     return 0;
+}
+
+PORT_WEAK void PortHostUIDiagnostic(const char* message)
+{
+    fprintf(stderr, "[port] %s\n", message != NULL ? message : "");
 }
