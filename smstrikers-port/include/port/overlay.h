@@ -22,6 +22,10 @@ void PortOverlaySetMatch(float clock, int scoreHome, int scoreAway);
 // The last of those labels, read back; the control channel's heartbeat prints it and has no window
 // to draw into. Never NULL.
 const char* PortOverlaySceneName(void);
+// The scene number the label begins with, as the engine recorded it: -1 before the first scene.
+// A host that has to tell "the game moved" apart from "the pad carried a bit" needs the engine's
+// own answer to the first question, and this is it rather than a host re-parsing the label.
+int PortOverlaySceneNumber(void);
 void PortOverlayToggleMenu(void);
 int  PortOverlayMenuOpen(void);
 void PortOverlayHandleKey(int scancode, int down);

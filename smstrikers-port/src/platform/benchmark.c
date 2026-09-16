@@ -47,12 +47,18 @@ static unsigned int s_inputAgeUs[BENCH_CAP];   // event pump to end of frame
 static unsigned int s_pipelinesCreated[BENCH_CAP];
 static unsigned int s_lastCreated;
 static unsigned int s_draws[BENCH_CAP], s_texUploadBytes[BENCH_CAP], s_vertBytes[BENCH_CAP];
+static signed char s_phaseFrame[BENCH_CAP];   // eGameState of the frame in the same slot
 static unsigned long long s_sleepUsTotal;
 static size_t s_count;
 static size_t s_dropped;
 static size_t s_skipped;          // frames before the match started
 static int s_matchActive;
 static int s_skipKickoff;         // discard the frame the match starts on
+
+// The eGameState the current frame belongs to, set by cGame's update and recorded with the frame.
+// -1 until the game says otherwise, so a row that carries -1 is one the game never classified
+// rather than one it called pre-game.
+static int s_phase = -1;
 
 // Always-on frame timing, for the overlay. Two clock reads a frame, so they are collected whether
 // or not STRIKERS_BENCHMARK is set: watching a spike during ordinary play is the case that matters.
@@ -66,6 +72,22 @@ static unsigned int s_lastBusyUs, s_lastPresentUs, s_lastFrameUs, s_lastSleepUs;
 static unsigned long s_frameCounter;
 static unsigned int s_worstUs;
 static unsigned long s_worstFrame;
+
+// The window is read as a frame *rate*, and a rate needs the whole interval between two presented
+// frames rather than the part of the loop PortBenchFrameBegin happens to bracket: Begin is called
+// after the loop's preamble (the event pump, the synthetic input, the host UI frame,
+// aurora_begin_frame), so Begin-to-End is short by that preamble and a window built from it reads
+// high -- 63.8 fps beside a loop that was in fact running at 59.9. The sample is therefore the
+// distance between two frame ends, which is the interval a viewer counts, and s_liveLastUs is that
+// same sample for the most recent frame so frameMs and fps are reciprocals of each other.
+static unsigned long long s_livePrevEnd;
+static unsigned int s_liveLastUs;
+
+// A span the window will not believe. A frame interval this long is not a frame: the app was
+// suspended, backgrounded or descheduled, and storing its microseconds would both overflow the
+// window's unsigned int and report a rate the game never ran at. The window keeps its last real
+// samples instead, so the counter reads what the game was doing rather than what the OS was.
+#define LIVE_SPAN_MAX_NS 1000000000ull
 
 // Labels. Fixed slots rather than a map: there are four of them, they are set once, and a benchmark
 // is not the place for an allocator.
@@ -140,6 +162,62 @@ void PortBenchInit(void)
 #define PORT_BUILD_TYPE "unknown"
 #endif
 
+// A trace of every produced frame of the process, not only the ones the match record keeps. The
+// match record answers the frame-rate question; this answers the questions that are about the run:
+// the cold segment -- boot, shaders, assets, the loading screens -- is discarded by
+// PortBenchMatchActive on purpose, so nothing else in the port can say how long it took or how bad
+// its worst frame was, and doc 34 asks for both. Streamed a line at a time rather than buffered in
+// the arrays above, because it starts before anything has been measured and because a run that
+// dies during loading should still have left its evidence behind.
+//
+// It lives below the label block because its header carries the same labels the CSV carries, and a
+// label is a run's identity: a trace whose header said "unknown" while the frames.csv beside it
+// named the build would be worse than no trace. PORT_BUILD_TYPE has the same reason.
+static FILE* s_trace;
+static int s_traceTried;
+static unsigned long s_traceFrame;
+
+// The interval between two presented frames, in microseconds, clamped: past four thousand seconds
+// it is not a frame and the number is only there to say so.
+static unsigned int span_us(unsigned long long ns)
+{
+    unsigned long long us = ns / 1000ull;
+    return (us > 0xFFFFFFFFull) ? 0xFFFFFFFFu : (unsigned int)us;
+}
+
+static void trace_frame(unsigned int gapUs, unsigned int busyUs, unsigned int presentUs,
+                        unsigned int frameUs)
+{
+    const char* path;
+    size_t i;
+
+    if (s_trace == NULL)
+    {
+        if (s_traceTried)
+            return;
+        s_traceTried = 1;
+        path = getenv("STRIKERS_BENCH_TRACE");
+        if (path == NULL || *path == '\0')
+            return;
+        s_trace = fopen(path, "w");
+        if (s_trace == NULL)
+        {
+            fprintf(stderr, "[bench] could not write %s\n", path);
+            return;
+        }
+        fprintf(s_trace, "# build=%s", PORT_BUILD_TYPE);
+        for (i = 0; i < s_labelCount; i++)
+            fprintf(s_trace, " %s=%s", s_labelKey[i], s_labelVal[i]);
+        fprintf(s_trace, "\nframe,pre,phase,gap_us,busy_us,present_us,frame_us\n");
+    }
+
+    // The pre column is 1 for a frame the match record will not keep, so the cold segment is a
+    // filter rather than an offset a reader has to reconstruct.
+    fprintf(s_trace, "%lu,%d,%d,%u,%u,%u,%u\n",
+            s_traceFrame++, s_matchActive ? 0 : 1, s_phase,
+            gapUs, busyUs, presentUs, frameUs);
+}
+
 int PortBenchEnabled(void) { return s_enabled; }
 int PortBenchWantsDemo(void) { return s_enabled && s_wantsDemo; }
 double PortBenchRunSeconds(void) { return s_runSeconds; }
@@ -172,6 +250,13 @@ double PortBenchElapsed(void)
     if (!s_matchActive)
         return 0.0;
     return (double)(port_monotonic_ns() - s_runStart) / 1e9;
+}
+
+// Set by cGame's update, once per simulation update, with the game's own eGameState. Read by
+// PortBenchFrameEnd and stored with the frame it belongs to.
+void PortBenchPhase(int state)
+{
+    s_phase = state;
 }
 
 void PortBenchFrameBegin(void)
@@ -237,7 +322,9 @@ void PortBenchGetLive(PortBenchLive* out)
 
     out->busyMs = (double)s_lastBusyUs / 1000.0;
     out->presentMs = (double)s_lastPresentUs / 1000.0;
-    out->frameMs = (double)s_lastFrameUs / 1000.0;
+    // The window's sample rather than the Begin-to-End span, so this and fps below are reciprocals
+    // and the overlay cannot show a frame time that disagrees with the rate beside it.
+    out->frameMs = (double)s_liveLastUs / 1000.0;
     out->sleepMs = (double)s_lastSleepUs / 1000.0;
     out->worstMs = (double)s_worstUs / 1000.0;
     out->worstFrame = s_worstFrame;
@@ -294,14 +381,28 @@ void PortBenchFrameEnd(void)
     s_lastSleepUs = (unsigned int)((s_sleepThisFrame + preSleep) / 1000ull);
     s_frameCounter++;
 
-    s_liveBusyUs[s_liveNext] = s_lastBusyUs;
-    s_liveFrameUs[s_liveNext] = s_lastFrameUs;
-    s_liveNext = (s_liveNext + 1) % LIVE_WINDOW;
-    if (s_liveFilled < LIVE_WINDOW)
-        s_liveFilled++;
+    // The window's own sample: end to end, so it is the interval between two presented frames and
+    // not only the part of the loop this function brackets. See s_livePrevEnd for why the two are
+    // not the same number, and LIVE_SPAN_MAX_NS for the one interval that is not a frame at all.
+    const unsigned long long liveSpan =
+        (s_livePrevEnd != 0 && end > s_livePrevEnd) ? (end - s_livePrevEnd) : frame;
+    s_livePrevEnd = end;
+    if (liveSpan <= LIVE_SPAN_MAX_NS)
+    {
+        s_liveLastUs = (unsigned int)(liveSpan / 1000ull);
+        s_liveBusyUs[s_liveNext] = s_lastBusyUs;
+        s_liveFrameUs[s_liveNext] = s_liveLastUs;
+        s_liveNext = (s_liveNext + 1) % LIVE_WINDOW;
+        if (s_liveFilled < LIVE_WINDOW)
+            s_liveFilled++;
+    }
 
     if (!s_enabled)
         return;
+
+    // The whole-process trace, taken before the s_matchActive branch below: the frames the match
+    // record throws away are exactly the cold ones this file exists to describe.
+    trace_frame(span_us(liveSpan), s_lastBusyUs, s_lastPresentUs, s_lastFrameUs);
 
     // Count, but do not record, anything before the match: see PortBenchMatchActive.
     if (!s_matchActive)
@@ -347,6 +448,7 @@ void PortBenchFrameEnd(void)
             }
             s_pipelinesCreated[s_count] = created;
         }
+        s_phaseFrame[s_count] = (signed char)s_phase;
         s_count++;
     }
     else
@@ -409,6 +511,11 @@ void PortBenchReport(void)
     if (!s_enabled)
         return;
 
+    // The trace is streamed, so a report interval is also what makes it readable from outside the
+    // process: a long run being watched while it runs needs its lines on disk, not in a buffer.
+    if (s_trace != NULL)
+        fflush(s_trace);
+
     // Saying so is the point: a run that never reached a match has measured the loading screen, and
     // reporting its numbers as if they were a match is how a benchmark starts reporting the loading
     // screen.
@@ -470,6 +577,39 @@ void PortBenchReport(void)
         fMean, fP50, fP95, fP99, fMax,
         iMean, iP50, iP95, iP99, iMax,
         sleepMean);
+
+    // What the recorded frames were, by the game's own state. The segments a run has to report
+    // separately are these values and not a clock, so a summary that printed one mean over "the
+    // match" would be reporting live play and the goal sequences as one thing.
+    {
+        size_t counts[8];
+        char line[192];
+        size_t k;
+        memset(counts, 0, sizeof counts);
+        line[0] = '\0';
+        for (k = 0; k < s_count; k++)
+        {
+            int p = (int)s_phaseFrame[k];
+            if (p >= 0 && p < 8)
+                counts[p]++;
+        }
+        for (k = 0; k < 8; k++)
+        {
+            size_t used;
+            if (counts[k] == 0)
+                continue;
+            used = strlen(line);
+            if (used > 0 && used + 16 < sizeof line)
+            {
+                line[used++] = ' ';
+                line[used] = '\0';
+            }
+            if (used + 16 < sizeof line)
+                snprintf(line + used, sizeof line - used, "%zu:%zu", k, counts[k]);
+        }
+        fprintf(stderr, "  match states    %s   (eGameState: 0 pre, 1 kickoff, 2 post-goal, "
+                        "3 end, 4 gameplay, 5 overtime)\n", line);
+    }
 
     // Headroom: how much slower a machine could be and still hold the frame rate it runs to.
     double field = 1000.0 / 59.94;
@@ -552,9 +692,11 @@ static void write_csv(void)
     fprintf(f, "# build=%s", PORT_BUILD_TYPE);
     for (i = 0; i < s_labelCount; i++)
         fprintf(f, " %s=%s", s_labelKey[i], s_labelVal[i]);
-    fprintf(f, "\nframe,busy_us,present_us,frame_us,acquire_us,pipelines_created,draws,tex_upload_bytes,vert_bytes,input_age_us\n");
+    fprintf(f, "\nframe,busy_us,present_us,frame_us,acquire_us,pipelines_created,draws,tex_upload_bytes,vert_bytes,input_age_us,phase\n");
     for (i = 0; i < s_count; i++)
-        fprintf(f, "%zu,%u,%u,%u,%u,%u,%u,%u,%u,%u\n", i, s_busyUs[i], s_presentUs[i], s_frameUs[i], s_acquireUs[i], s_pipelinesCreated[i], s_draws[i], s_texUploadBytes[i], s_vertBytes[i], s_inputAgeUs[i]);
+        fprintf(f, "%zu,%u,%u,%u,%u,%u,%u,%u,%u,%u,%d\n", i, s_busyUs[i], s_presentUs[i], s_frameUs[i],
+                s_acquireUs[i], s_pipelinesCreated[i], s_draws[i], s_texUploadBytes[i],
+                s_vertBytes[i], s_inputAgeUs[i], (int)s_phaseFrame[i]);
     fclose(f);
     fprintf(stderr, "[bench] wrote %zu frames to %s\n", s_count, path);
 }

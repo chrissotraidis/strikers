@@ -184,21 +184,24 @@ BaseSceneHandler* BaseGameSceneManager::Push(SceneList newscene, ScreenMovement 
         newscene = SCENE_MARIO_BACKGROUND;
     }
 
-    // PORT: progress marker, see the note on.
-    if (getenv("STRIKERS_LOG_SCENES") != NULL)
-        OSReport("[port] enter scene %d\n", (int)newscene);
-
-    // PORT: and tell the synthetic-input driver, so a scripted press can be anchored to a screen rather than to a frame number.
-    PortNoteSceneEntered((int)newscene);
-
-    // PORT: and the debug menu, which had no way to name the screen it was drawn over.
+    // PORT: progress marker, see the note on. The package name is part of the line and not only of
+    // the ten-second heartbeat, because the two screens a script most wants to wait for -- the
+    // health warning and the title -- are both over before the first heartbeat names them.
     {
         char sceneLabel[64];
         BasicString<char, Detail::TempStringAllocator> sceneFile = GetFileName(newscene);
         nlSNPrintf(sceneLabel, sizeof sceneLabel, "%d  %s", (int)newscene,
                    sceneFile.c_str() != NULL ? sceneFile.c_str() : "?");
+
+        if (getenv("STRIKERS_LOG_SCENES") != NULL)
+            OSReport("[port] enter scene %s\n", sceneLabel);
+
+        // PORT: and the debug menu, which had no way to name the screen it was drawn over.
         PortOverlaySetScene(sceneLabel);
     }
+
+    // PORT: and tell the synthetic-input driver, so a scripted press can be anchored to a screen rather than to a frame number.
+    PortNoteSceneEntered((int)newscene);
 
     GetConfigBool(Config::Global(), "fev2", false);
 

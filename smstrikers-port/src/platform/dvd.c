@@ -10,9 +10,10 @@
 #include "dolphin/types.h"
 #include "port/config.h"
 #include "port/disc.h"
-#include "port/fatal.h"
+#include "port/gamedata.h"
 #include "port/host.h"
 #include "port/disc_reader.h"
+#include "port/hostui.h"
 #include "port/region.h"
 
 void OSReport(const char* msg, ...);
@@ -36,6 +37,14 @@ static u8 s_disk_id[32];
 static int s_disk_id_read;
 // Whether the id was chosen rather than read, for the DVD: disc line.
 static int s_disk_id_guessed;
+
+// The caches every resolver downstream of the disc table fills in, file-scope so that dvd_forget()
+// can clear them: after a host import the disc is a different disc, and an answer derived from the
+// refused attempt would be about data that is no longer there.
+static int s_disk_id_loaded;      // load_disk_id
+static int s_region_cache = -1;   // port_region
+static char s_game_code[5];       // port_disc_game_code
+static char s_maker_code[3];      // port_disc_maker_code
 
 typedef struct DVDCommandBlock DVDCommandBlock;
 typedef void (*DVDCBCallback)(s32 result, DVDCommandBlock* block);
@@ -148,13 +157,77 @@ static void scan(const char* hostDir, const char* relDir)
     port_scan_dir(hostDir, visit_entry, &ctx);
 }
 
-// The image path: the same table, built from the disc's own FST.
+// ── Refusal, not exit ────────────────────────────────────────────────────────────────────────
+//
+// DVDInit runs from a static initialiser, before a host application's own framework exists (see
+// include/port/gamedata.h). Exiting there would take a host that can import the player's own disc
+// down with it, so a disc the port cannot use is recorded and the port's entry point decides: the
+// host's importer gets its chance first, and only if it declines does this become the same box, with
+// the same text, that it always was.
+static char s_refuseTitle[128];
+static char s_refuseMessage[4096];
+static int s_refused;
 
-static void image_fatal(const char* path, const char* text)
+static void dvd_refuse(const char* title, const char* text)
+{
+    snprintf(s_refuseTitle, sizeof s_refuseTitle, "%s", title);
+    snprintf(s_refuseMessage, sizeof s_refuseMessage, "%s", text);
+    s_refused = 1;
+}
+
+int PortGameDataReady(void)
+{
+    return s_count != 0 && !s_refused;
+}
+
+const char* PortGameDataErrorTitle(void)
+{
+    return s_refuseTitle;
+}
+
+const char* PortGameDataErrorMessage(void)
+{
+    return s_refuseMessage;
+}
+
+// A fresh start: everything a resolution attempt built, and everything it derived, so the next
+// attempt cannot be answered by the attempt that was refused. The table is malloc'ed rather than
+// taken from the game heap, so this is safe whenever the host's import finishes, however late that
+// is.
+static void dvd_forget(void)
+{
+    int i;
+    for (i = 0; i < s_count; i++)
+    {
+        free(s_entries[i].path);
+        free(s_entries[i].host);
+    }
+    free(s_entries);
+    s_entries = NULL;
+    s_count = 0;
+    s_cap = 0;
+    s_root[0] = '\0';
+    if (s_disc != NULL)
+    {
+        port_disc_close(s_disc);
+        s_disc = NULL;
+    }
+    s_disk_id_read = 0;
+    s_disk_id_guessed = 0;
+    s_disk_id_loaded = 0;
+    s_region_cache = -1;
+    s_game_code[0] = '\0';
+    s_maker_code[0] = '\0';
+    s_refused = 0;
+    s_refuseTitle[0] = '\0';
+    s_refuseMessage[0] = '\0';
+}
+
+static void image_refuse(const char* path, const char* text)
 {
     char msg[4096];
     snprintf(msg, sizeof msg, "%s\n\n  Image: %s\n", text, path);
-    port_fatal("Super Mario Strikers: unusable disc image", msg);
+    dvd_refuse("Super Mario Strikers: unusable disc image", msg);
 }
 
 static int index_visit(void* user, const char* path, unsigned offset, unsigned length,
@@ -166,7 +239,8 @@ static int index_visit(void* user, const char* path, unsigned offset, unsigned l
     return 0;
 }
 
-static void index_image_fst(const char* path)
+// 0 when the image is indexed and usable, -1 when it has been refused with a reason.
+static int index_image_fst(const char* path)
 {
     char err[2048];
 
@@ -174,30 +248,45 @@ static void index_image_fst(const char* path)
     // sys/boot.bin, which is a copy of them, so region handling is identical either way
     // (include/port/region.h).
     if (port_disc_read(s_disc, s_disk_id, sizeof s_disk_id, 0) != (long)sizeof s_disk_id)
-        image_fatal(path, "That image is too short to hold a disc header.");
+    {
+        image_refuse(path, "That image is too short to hold a disc header.");
+        return -1;
+    }
     s_disk_id_read = 1;
 
     if (port_disc_walk(s_disc, index_visit, NULL, err, sizeof err) != 0)
-        image_fatal(path, err);
+    {
+        image_refuse(path, err);
+        return -1;
+    }
+    return 0;
 }
 
-// Open `path` as a disc image and index it.
-static void open_image(const char* path)
+// Open `path` as a disc image and index it. 0 on success, -1 when refused.
+static int open_image(const char* path)
 {
     char err[2048];
 
     s_disc = port_disc_open(path, err, sizeof err);
     if (s_disc == NULL)
-        image_fatal(path, err);
+    {
+        image_refuse(path, err);
+        return -1;
+    }
 
     snprintf(s_root, sizeof s_root, "%s", path);
-    index_image_fst(path);
+    if (index_image_fst(path) != 0)
+        return -1;
 
     // An image whose FST names no files would leave s_disc set and s_count 0, so DVDInit would scan
     // a directory into the same table, whose entries then carry host paths while reads take the
     // image branch.
     if (s_count == 0)
-        image_fatal(path, "That image contains no files at all.");
+    {
+        image_refuse(path, "That image contains no files at all.");
+        return -1;
+    }
+    return 0;
 }
 
 // A path names an image if it is a file rather than a directory.
@@ -229,13 +318,19 @@ static void pick_image(void* user, const char* name)
 #define DVD_SENTINEL "common.ini"
 
 // The paths tried, in the order tried, so the message can name them.
-#define DVD_MAX_TRIED 4
+#define DVD_MAX_TRIED 5
 
 void DVDInit(void)
 {
     char tried[DVD_MAX_TRIED][1024];
     const char* triedWhy[DVD_MAX_TRIED];
     int nTried = 0;
+
+    // A second call means a host supplied data after an attempt was refused, so start from the state
+    // the first attempt started from rather than from a half-built table: a folder of the wrong game
+    // scans into that table before it is refused.
+    if (s_refused)
+        dvd_forget();
 
     if (s_count)
         return;
@@ -252,9 +347,36 @@ void DVDInit(void)
         snprintf(tried[nTried], sizeof tried[0], "%s", s_root);
         triedWhy[nTried++] = why;
         if (is_regular_file(s_root))
-            open_image(s_root);   // never returns if it is not a usable image
+        {
+            // Refused: the player named this path, so no later candidate can make it usable, and the
+            // entry point is about to hand the reason to the host.
+            if (open_image(s_root) != 0)
+                return;
+        }
         else
             scan(s_root, "");
+    }
+
+    // The host application's own store, for a host that takes the player's disc in itself rather
+    // than asking the player to arrange files around an executable (include/port/hostui.h). Ahead of
+    // the directory beside the executable because on a sandboxed platform that one is a read-only
+    // application bundle. Named in the message only when the host has something to name.
+    if (s_count == 0)
+    {
+        const char* host = PortHostUIGameDataPath();
+        if (host != NULL && *host != '\0')
+        {
+            snprintf(s_root, sizeof s_root, "%s", host);
+            snprintf(tried[nTried], sizeof tried[0], "%s", s_root);
+            triedWhy[nTried++] = "the application's own store";
+            if (is_regular_file(s_root))
+            {
+                if (open_image(s_root) != 0)
+                    return;
+            }
+            else
+                scan(s_root, "");
+        }
     }
 
     // Beside the executable, which is what an unpacked release archive looks like: strikers(.exe)
@@ -287,7 +409,8 @@ void DVDInit(void)
                 snprintf(s_root, sizeof s_root, "%s/%s", dir, ctx.best);
                 snprintf(tried[nTried], sizeof tried[0], "%s", s_root);
                 triedWhy[nTried++] = "a disc image beside the game";
-                open_image(s_root);
+                if (open_image(s_root) != 0)
+                    return;
             }
         }
     }
@@ -311,8 +434,9 @@ void DVDInit(void)
     else
         fprintf(stderr, "[port] DVD: %d files under %s\n", s_count, s_root);
 
-    // PORT: fatal rather than zero files and a printed warning; launched from a file manager there
-    // is no console to read.
+    // PORT: a refusal rather than zero files and a printed warning; launched from a file manager
+    // there is no console to read, and on a host with its own importer this text is what that
+    // importer shows instead of the process ending here.
     if (s_count == 0)
     {
         char msg[4096];
@@ -339,7 +463,8 @@ void DVDInit(void)
                      "  * set the `data` key in strikers.ini (beside the game) "
                      "to either of those, or\n"
                      "  * set the STRIKERS_DATA environment variable to it.\n");
-        port_fatal("Super Mario Strikers: game data not found", msg);
+        dvd_refuse("Super Mario Strikers: game data not found", msg);
+        return;
     }
 
     // Files, but not this game's files. A folder of holiday photos scans perfectly well and then
@@ -359,7 +484,8 @@ void DVDInit(void)
                      : " The path is probably\npointing one level too high or "
                        "too low: it must be the `files` folder itself,\nthe one "
                        "that contains `common.ini`, `art` and `audio`.");
-        port_fatal("Super Mario Strikers: wrong game data", msg);
+        dvd_refuse("Super Mario Strikers: wrong game data", msg);
+        return;
     }
 
     load_disk_id();
@@ -392,8 +518,17 @@ void DVDInit(void)
                  "another game's `sys` is the usual cause.\n",
                  s_disc != NULL ? "in this image" : "beside this data",
                  s_root, found);
-        port_fatal("Super Mario Strikers: wrong disc", msg);
+        dvd_refuse("Super Mario Strikers: wrong disc", msg);
+        return;
     }
+}
+
+// Resolve again from the state the first attempt started from. Called by the port's entry point
+// after a host has staged the player's own disc, so that main.cpp needs no knowledge of the DVD
+// layer it is re-running.
+void PortGameDataResolve(void)
+{
+    DVDInit();
 }
 
 // STRIKERS_PROBE_DVD: name every open and every read, with the bytes asked for against the bytes
@@ -767,13 +902,12 @@ static const char* region_id_from_setting(const char* v)
 // first static initialiser.
 static void load_disk_id(void)
 {
-    static int s_done;
     char p[1200];
     FILE* f;
 
-    if (s_done)
+    if (s_disk_id_loaded)
         return;
-    s_done = 1;
+    s_disk_id_loaded = 1;
 
     // An image has already filled these in from its own first 32 bytes, which is exactly what
     // sys/boot.bin is a copy of.
@@ -841,38 +975,35 @@ static const u8* disk_id_bytes(void)
 // The whole of the runtime region decision, and the reason this port needs no per-region build.
 int port_region(void)
 {
-    static int s_region = -1;
-    if (s_region < 0)
+    if (s_region_cache < 0)
     {
         const u8* id = disk_id_bytes();
         if (id[0] == 'G' && id[1] == '4' && id[2] == 'Q' && id[3] == 'P')
-            s_region = PORT_REGION_EUROPE;
+            s_region_cache = PORT_REGION_EUROPE;
         else if (id[0] == 'G' && id[1] == '4' && id[2] == 'Q' && id[3] == 'J')
-            s_region = PORT_REGION_JAPAN;
+            s_region_cache = PORT_REGION_JAPAN;
         else
-            s_region = PORT_REGION_USA;
+            s_region_cache = PORT_REGION_USA;
     }
-    return s_region;
+    return s_region_cache;
 }
 
 const char* port_disc_game_code(void)
 {
-    static char code[5];
-    if (code[0] == 0)
+    if (s_game_code[0] == 0)
     {
-        memcpy(code, disk_id_bytes(), 4);
-        code[4] = '\0';
+        memcpy(s_game_code, disk_id_bytes(), 4);
+        s_game_code[4] = '\0';
     }
-    return code;
+    return s_game_code;
 }
 
 const char* port_disc_maker_code(void)
 {
-    static char code[3];
-    if (code[0] == 0)
+    if (s_maker_code[0] == 0)
     {
-        memcpy(code, disk_id_bytes() + 4, 2);
-        code[2] = '\0';
+        memcpy(s_maker_code, disk_id_bytes() + 4, 2);
+        s_maker_code[2] = '\0';
     }
-    return code;
+    return s_maker_code;
 }

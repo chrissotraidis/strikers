@@ -50,6 +50,7 @@ extern cBall* g_pBall;
 extern eCameraType g_eCurrentCameraType;   // Camera/CameraMan.cpp
 extern PowerupBase* g_pPowerups[25];       // AI/Powerups.cpp
 #include "port/benchmark.h"
+#include "port/host.h"     // PORT: port_monotonic_ns, the wall instant the [match] line carries
 extern PowerupBase* g_pPowerups[];
 extern cCharacter* g_pCurrentlyUpdatingCharacter;
 extern cTeam* g_pCurrentlyUpdatingTeam;
@@ -1187,6 +1188,10 @@ void cGame::Update(float deltaTime)
         m.suddenDeath = mInSuddenDeath ? 1 : 0;
         PortDiscordSetMatch(&m);
     }
+    // PORT: and records what the frame it is measuring is, by the game's own state. GS_GAMEPLAY
+    // and GS_OVERTIME are the active-play segment; the rest of a match is the goal, the replay and
+    // the kickoff, which doc 34 asks to be measured on their own.
+    PortBenchPhase((int)GetGameState());
 
     // PORT: hand the debug menu the state it cannot reach for itself.
     if ((PortOverlayMenuOpen() || PortDebugStateWanted())
@@ -1376,8 +1381,18 @@ void cGame::Update(float deltaTime)
             && g_pBall != NULL && m_pGameClock != NULL)
         {
             const nlVector3& b = g_pBall->GetPosition();
-            OSReport("[match] t=%.1f/%.1f state=%d ot=%d score %d-%d "
+            // PORT: ms and upd are what make this line a rate rather than a state. doc 34 asks a
+            // run's in-game clock progression and its fixed-update rate to be compared with the
+            // desktop reference within 2%, and neither can be read from a clock value on its own:
+            // t is in game seconds, this is the wall instant and the count of updates behind it.
+            // upd advances by exactly 60 between two lines -- the same 60 the cadence below counts
+            // -- so a line that skips or repeats is visible as a jump rather than as drift.
+            // t carries milliseconds rather than tenths because the rate below is a ratio of two
+            // of these samples across a minute: a tenth of a second per line quantises a
+            // sixty-second window by up to 5%, which is coarser than the 2% the row allows.
+            OSReport("[match] ms=%llu upd=%d t=%.3f/%.3f state=%d ot=%d score %d-%d "
                      "ball=(%.2f,%.2f,%.2f)\n",
+                     (unsigned long long)(port_monotonic_ns() / 1000000ull), nMatchLog - 1,
                      (double)m_pGameClock->m_fTimer, (double)m_fGameDuration,
                      (int)GetGameState(), (int)mInSuddenDeath,
                      g_pTeams[0]->m_nScore, g_pTeams[1]->m_nScore,

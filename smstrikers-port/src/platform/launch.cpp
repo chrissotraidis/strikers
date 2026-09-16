@@ -395,6 +395,11 @@ float g_auroraScale;
 unsigned g_rowsWanted;
 unsigned g_rowsGot;
 
+// The target size the frame loop has already acted on. Distinct from g_rowsGot, which is what the
+// scale bisection saw: a window resize, an aspect change and a scale change can all move this.
+unsigned g_appliedTargetW;
+unsigned g_appliedTargetH;
+
 void ApplyRenderRows()
 {
     if (g_renderScale <= 0.0f)
@@ -482,6 +487,19 @@ void PortFollowRenderScale(unsigned int windowHeight)
 void PortSetRenderScale(float scale)
 {
     g_renderScaleChecked = true;
+    if (scale <= 0.0f)
+    {
+        // A host interface's "follow the display again", not a scale of zero: the bisection and
+        // Aurora would both read 0 as a literal request. Clearing the pin is the whole of it --
+        // PortFollowRenderScale re-derives from the window height on the next frame -- and
+        // dropping the memo makes the re-derivation print even when it lands on the same rows, so
+        // a mid-run change is visible in the log rather than inferred.
+        g_renderScalePinned = false;
+        g_renderScale = 0.0f;
+        g_rowsWanted = 0;
+        return;
+    }
+
     g_renderScalePinned = true;
     g_renderScale = scale;
 #if defined(__SWITCH__)
@@ -497,6 +515,25 @@ void PortSetRenderScale(float scale)
 float PortRenderScale(void)
 {
     return g_renderScale;
+}
+
+void PortRenderTargetSize(unsigned int* width, unsigned int* height)
+{
+    const AuroraWindowSize ws = aurora_window_size();
+    if (width != NULL)
+        *width = ws.fb_width;
+    if (height != NULL)
+        *height = ws.fb_height;
+}
+
+int PortTakeRenderTargetChange(void)
+{
+    const AuroraWindowSize ws = aurora_window_size();
+    if (ws.fb_width == g_appliedTargetW && ws.fb_height == g_appliedTargetH)
+        return 0;
+    g_appliedTargetW = ws.fb_width;
+    g_appliedTargetH = ws.fb_height;
+    return 1;
 }
 
 #endif // PORT_USE_AURORA

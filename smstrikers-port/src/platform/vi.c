@@ -27,7 +27,8 @@ typedef void (*VIRetraceCallback)(u32 retraceCount);
 #define PORT_FALLBACK_FRAME_NS 8333333ull
 
 // How far above the display's refresh rate the limiter sits while vsync is also pacing, so the two
-// never fight over which one ends the frame.
+// never fight over which one ends the frame. It is capped at the NTSC field below: the margin is
+// about which pacer ends a frame, and how fast the game itself runs is not the margin's to change.
 #define PORT_VSYNC_HEADROOM 1.05
 
 static VIRetraceCallback s_pre_cb;
@@ -103,10 +104,28 @@ static u64 frame_period_ns(void)
             {
                 hz *= PORT_VSYNC_HEADROOM;
             }
-            s_period = (u64)(1000000000.0 / hz);
             why = !s_displayVsync ? "display"
                   : underGamescope ? "display, exact: gamescope paces by this limiter"
                                    : "display, +5% for vsync";
+
+            // This period is the game's clock, not just the renderer's pace: VIWaitForRetrace
+            // waits for it and then advances s_retrace_count, and nothing in the tree decouples
+            // the two, so one loop of this period is one game frame of game time. The game is
+            // authored for the NTSC field, so a rate above VI_FIELD_NS does not buy frames -- it
+            // buys speed. The audio transport is drained in real time, 5 ms of audio a tick, and
+            // cannot follow a clock that is running fast: game time pulls ahead of the device,
+            // and every voice lands further behind the model that speaks it than the one before.
+            //
+            // The cap is applied after the panel's own adjustments above rather than instead of
+            // them, so a display below the field keeps gamescope's exact rate or vsync's margin
+            // and only a display above it is held back.
+            const double fieldHz = 1000000000.0 / (double)VI_FIELD_NS;
+            if (hz > fieldHz)
+            {
+                hz = fieldHz;
+                why = "display, capped at the field";
+            }
+            s_period = (u64)(1000000000.0 / hz);
         }
         else
         {

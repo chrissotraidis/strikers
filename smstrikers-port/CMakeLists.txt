@@ -235,6 +235,13 @@ if(MSVC)
         # everywhere else.
         /clang:-Werror=pointer-to-int-cast
         /clang:-Werror=void-pointer-to-int-cast
+        # -fshort-wchar is mandatory here (prelude.h rejects a build without it), and it
+        # also makes a plain `unsigned short` scan ABI-compatible with wchar_t. clang's
+        # loop-idiom recognition then lowers such a scan to the C library's wcslen, but
+        # macOS has no 16-bit wcslen: libSystem's walks 32-bit units, so each scan came
+        # back with half the true length and could read past the end of its buffer.
+        # Keep every wide scan a plain loop.
+        /clang:-fno-builtin-wcslen
         $<$<BOOL:${STRIKERS_ASAN}>:-fsanitize=address>
     )
 else()
@@ -247,6 +254,9 @@ else()
         -Wno-invalid-offsetof
         # GCC rejects a member named after its own type, which the decompiled structs use.
         $<$<AND:$<BOOL:${NX}>,$<COMPILE_LANGUAGE:CXX>>:-Wno-changes-meaning>
+        # See the MSVC branch above: without this, -fshort-wchar makes clang rewrite a
+        # 16-bit string scan into Darwin's 32-bit wcslen, which reports half a length.
+        -fno-builtin-wcslen
         $<$<BOOL:${STRIKERS_ASAN}>:-fsanitize=address>
         $<$<BOOL:${STRIKERS_ASAN}>:-fno-omit-frame-pointer>
     )
@@ -473,8 +483,10 @@ if(WIN32)
     endif()
 endif()
 
-# The name macOS shows in the menu bar, from assets/macos/Info.plist.
-if(APPLE)
+# The name macOS shows in the menu bar, from assets/macos/Info.plist. iOS is not macOS here: an
+# iOS application takes its Info.plist from the .app bundle the host target builds, and a second
+# copy in a __TEXT section would be the one nothing reads.
+if(APPLE AND NOT IOS)
     configure_file(assets/macos/Info.plist "${CMAKE_CURRENT_BINARY_DIR}/Info.plist" @ONLY)
     target_link_options(strikers PRIVATE
         "-Wl,-sectcreate,__TEXT,__info_plist,${CMAKE_CURRENT_BINARY_DIR}/Info.plist")

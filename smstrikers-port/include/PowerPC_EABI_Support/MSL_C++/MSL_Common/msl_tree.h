@@ -15,13 +15,19 @@ struct binary_function
 {
 };
 
-// PORT: MSVC's <type_traits> already defines std::less.
-#if !defined(_MSC_VER)
+// PORT: this placeholder is deliberately NOT named std::less. libc++'s <type_traits> (reached
+// through include/port/prelude.h) now brings a forward declaration of std::less into scope, and a
+// second declaration of that name in namespace std is ambiguous at every use, not merely a
+// redefinition. MSVC's <type_traits> defines std::less outright, which is why only that one was
+// guarded before. It has no call operator and __tree only stores it, so the name is the only thing
+// that can matter here.
+namespace msl_port
+{
 template <class T>
 struct less : public binary_function<T, T, bool>
 {
 };
-#endif
+} // namespace msl_port
 
 template <int N>
 class __red_black_tree
@@ -360,7 +366,7 @@ __tree<T, Compare, Allocator>::insert_node_at(node* p, bool leftchild, bool is_l
     return new_node;
 }
 
-template <class Key, class Value, class Compare = less<Key>, class Allocator = allocator<pair<const Key, Value> > >
+template <class Key, class Value, class Compare = msl_port::less<Key>, class Allocator = allocator<pair<const Key, Value> > >
 class map
 {
 public:

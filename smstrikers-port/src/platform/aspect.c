@@ -65,6 +65,53 @@ unsigned int PortAspectGeneration(void)
     return s_generation;
 }
 
+// A host interface's own aspect setting. The shipped model resolves the target once, from
+// STRIKERS_ASPECT, and thereafter only *follows* the window; this is the missing way to change the
+// target itself after startup, which is what a runtime menu row needs. Setting a value takes the
+// aspect off the window (s_follows = 0) so PortSetWindowAspect stops overwriting it; a value <= 0
+// hands it back. Either way the generation moves so the frame loop re-derives what is sized from
+// the display aspect and resizes the frame buffer, exactly as it does for a window shape change.
+void PortSetTargetAspect(float aspect)
+{
+    float a;
+    float was;
+
+    s_resolved = 1;
+    s_follows = (aspect > 0.0f) ? 0 : 1;
+
+    if (s_follows)
+    {
+        a = (s_windowAspect > 0.0f) ? ClampAspect(s_windowAspect) : s_aspect;
+        if (a <= 0.0f)
+            a = 16.0f / 9.0f;
+    }
+    else
+    {
+        a = ClampAspect(aspect);
+        if (a != aspect)
+            fprintf(stderr, "[aspect] %.4f is outside [%.2f, %.2f]; using %.4f.\n",
+                    (double)aspect, (double)PORT_ASPECT_MIN, (double)PORT_ASPECT_MAX, (double)a);
+    }
+
+    if (a == s_aspect)
+        return;
+
+    was = s_aspect;
+    s_aspect = a;
+    s_generation++;
+
+    // Read back rather than assumed: the width below is what the game's viewport, scissor and 2D
+    // projections will use, so it is the number that shows the change reached the renderer.
+    if (getenv("STRIKERS_LOG_FRUSTUM") != NULL)
+        fprintf(stderr, "[aspect] host set %.4f (was %.4f), logical width %u\n",
+                (double)a, (double)was, PortLogicalFrameWidth());
+}
+
+int PortAspectFollowsWindow(void)
+{
+    return s_follows;
+}
+
 // "16:9" and "16/9" and "1.7777". Returns 0 on anything else, including "auto", which the caller
 // handles, because it is not a value but a promise to keep following the window.
 static float ParseAspect(const char* s)

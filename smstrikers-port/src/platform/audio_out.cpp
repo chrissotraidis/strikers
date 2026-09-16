@@ -12,6 +12,9 @@
 #include <cstring>
 #include <cstdint>
 
+// port_monotonic_ns, for the hand-over timestamps the stream's drain rate is measured against.
+#include "port/host.h"
+
 // salPortNextBuffer() returns the ring slot the DAC would be playing and advances MusyX by one 5 ms
 // tick.
 extern "C" {
@@ -56,6 +59,28 @@ static unsigned long s_updateCalls;
 static double s_updateTotalMs;
 static double s_updateMaxMs;
 static unsigned long s_updateOver2ms;
+
+// The transport's own delay, which is the half of the operator's "the sounds seem disconnected from
+// the models speaking them" that a mixer peak can never answer: how much audio the game has already
+// produced but the device has not played. Measured as the queue's own length in milliseconds at the
+// moment the newest buffer is handed over, so it is the delay that buffer will actually serve.
+// Everything is at the stream's rate; the device resamples, which changes how the bytes are spelled
+// and not how long they last.
+double s_leadMs = 0.0;
+double s_leadMinMs = 0.0;
+double s_leadMaxMs = 0.0;
+double s_leadSumMs = 0.0;
+unsigned long s_handovers = 0;         // game frames that queued at least one buffer
+double s_deviceMs = 0.0;               // what the device holds in front of the stream
+unsigned long long s_firstPushNs = 0;
+unsigned long long s_lastPushNs = 0;
+unsigned long long s_bytesPushed = 0;
+
+// The stream's own byte rate: 32000 frames a second of interleaved s16. The drain check divides by
+// this, and a measured rate far from it is how "the queue is a length in time" can fail.
+unsigned int streamByteRate(void) {
+    return (unsigned int)(kSampleRate * kChannels * (int)sizeof(int16_t));
+}
 
 void report() {
     if (logging() && s_updateCalls != 0)
@@ -124,6 +149,18 @@ int PortAudioStart(void) {
     // does not.
     std::atexit(report);
 
+    // What the device holds in front of the stream, taken whether or not anything is being logged:
+    // the onset reading is the stream's queue plus this, and a row that published the queue alone
+    // would understate the delay the speaker is behind the frame by.
+    {
+        SDL_AudioSpec deviceSpec;
+        int deviceFrames = 0;
+        std::memset(&deviceSpec, 0, sizeof(deviceSpec));
+        if (SDL_GetAudioDeviceFormat(SDL_GetAudioStreamDevice(s_stream), &deviceSpec, &deviceFrames)
+            && deviceSpec.freq > 0)
+            s_deviceMs = (double)deviceFrames * 1000.0 / (double)deviceSpec.freq;
+    }
+
     if (logging()) {
         SDL_AudioDeviceID dev = SDL_GetAudioStreamDevice(s_stream);
         SDL_AudioSpec got;
@@ -132,9 +169,10 @@ int PortAudioStart(void) {
         if (SDL_GetAudioDeviceFormat(dev, &got, &frames)) {
             std::fprintf(stderr,
                          "[port] audio: device \"%s\" %d Hz %d ch fmt 0x%x, %d-frame buffer; "
-                         "feeding %d Hz s16 stereo in %u-byte ticks\n",
+                         "feeding %d Hz s16 stereo in %u-byte ticks, kept %d deep\n",
                          SDL_GetAudioDeviceName(dev), got.freq, got.channels,
-                         (unsigned)got.format, frames, kSampleRate, salPortBufferBytes());
+                         (unsigned)got.format, frames, kSampleRate, salPortBufferBytes(),
+                         kTargetBuffers);
         }
     }
     return 1;
@@ -202,6 +240,9 @@ void PortAudioUpdate(void) {
     if (want > kMaxBuffersPerUpdate)
         want = kMaxBuffersPerUpdate;
 
+    const unsigned long long pushBeginNs = port_monotonic_ns();
+    unsigned long pushed = 0;
+
     for (int i = 0; i < want; ++i) {
         void* pcm = salPortNextBuffer();
         if (pcm == nullptr)
@@ -227,7 +268,48 @@ void PortAudioUpdate(void) {
         if (!SDL_PutAudioStreamData(s_stream, pcm, static_cast<int>(bufBytes)))
             break;
         ++s_buffers;
+        ++pushed;
+        s_bytesPushed += bufBytes;
     }
+
+    // The reading itself: what is queued once this frame's audio is on the end of it is the delay
+    // the newest of it will serve, which is what an onset offset is. Sampled only for frames that
+    // actually queued something, so a frame that wanted nothing neither moves the minimum towards a
+    // queue that is short because nothing is being fed.
+    if (pushed != 0) {
+        const int after = SDL_GetAudioStreamQueued(s_stream);
+        if (after >= 0) {
+            s_lastPushNs = port_monotonic_ns();
+            if (s_firstPushNs == 0)
+                s_firstPushNs = pushBeginNs;
+            s_leadMs = (double)after * 1000.0 / (double)streamByteRate();
+            if (s_handovers == 0 || s_leadMs < s_leadMinMs)
+                s_leadMinMs = s_leadMs;
+            if (s_handovers == 0 || s_leadMs > s_leadMaxMs)
+                s_leadMaxMs = s_leadMs;
+            s_leadSumMs += s_leadMs;
+            ++s_handovers;
+        }
+    }
+}
+
+int PortAudioLatencyStats(PortAudioLatencyInfo* out) {
+    if (out == nullptr)
+        return 0;
+    *out = PortAudioLatencyInfo();
+    if (s_stream == nullptr)
+        return 0;
+    out->leadMs = s_leadMs;
+    out->leadMinMs = s_leadMinMs;
+    out->leadMaxMs = s_leadMaxMs;
+    out->leadMeanMs = s_handovers != 0 ? s_leadSumMs / (double)s_handovers : 0.0;
+    out->handovers = s_handovers;
+    out->deviceMs = s_deviceMs;
+    out->streamByteRate = streamByteRate();
+    const unsigned long long span =
+        s_lastPushNs > s_firstPushNs ? s_lastPushNs - s_firstPushNs : 0;
+    out->drainBytesPerSec = span != 0 ? (double)s_bytesPushed * 1e9 / (double)span : 0.0;
+    return 1;
 }
 
 void PortAudioStats(unsigned long* outBuffers, unsigned long* outUnderruns, int* outEverNonSilent) {
@@ -251,6 +333,11 @@ void PortAudioStats(unsigned long* outBuffers, unsigned long* outUnderruns, int*
         *outUnderruns = 0;
     if (outEverNonSilent != nullptr)
         *outEverNonSilent = 0;
+}
+int PortAudioLatencyStats(PortAudioLatencyInfo* out) {
+    if (out != nullptr)
+        *out = PortAudioLatencyInfo();
+    return 0;
 }
 
 #endif

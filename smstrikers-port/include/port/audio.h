@@ -27,6 +27,26 @@ int PortAudioDeviceOpen(void);
 void PortAudioUpdateCost(unsigned long* calls, double* meanMs, double* maxMs,
                          unsigned long* over2ms);
 
+// The transport's own delay, which is the half of a sync report a mixer peak cannot reach: the
+// sound is sounding, and this is how far behind the frame that produced it the device still is.
+// Every millisecond here is measured at the stream's rate, and all of it is audio the game has
+// already produced. The device's own buffer sits in front of this, so the delay the speaker is
+// behind the frame is lead plus device, and both are reported.
+typedef struct PortAudioLatencyInfo
+{
+    double leadMs;               // what the newest audio's frame left queued, i.e. its own delay
+    double leadMinMs;            // the smallest that has been since the device opened
+    double leadMaxMs;            // the largest
+    double leadMeanMs;           // the mean over the frames counted below
+    unsigned long handovers;     // game frames that queued audio, which is what the mean is over
+    double deviceMs;             // what the device holds ahead of the stream, from its own format
+    double drainBytesPerSec;     // the stream's bytes measured leaving: the push rate at steady state
+    unsigned int streamByteRate; // what that rate should be, 32000 * 2 * 2
+} PortAudioLatencyInfo;
+
+// Returns 0 until the device has been handed audio (audio off, or nothing queued yet).
+int PortAudioLatencyStats(PortAudioLatencyInfo* out);
+
 // The mixer's state, as STRIKERS_LOG_AUDIO prints it every two seconds: the six numbers that
 // between them name every separate cause of silence.
 typedef struct PortAudioMixInfo

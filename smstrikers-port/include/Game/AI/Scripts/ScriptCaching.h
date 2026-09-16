@@ -36,7 +36,7 @@ inline ScriptQuestionKey MakeScriptQuestionKey(uintptr_t question, const Variant
 }
 
 typedef std::pair<const ScriptQuestionKey, FuzzyVariant> ScriptCachePair;
-typedef std::map<ScriptQuestionKey, FuzzyVariant, std::less<ScriptQuestionKey>, std::allocator<ScriptCachePair> > ScriptCacheMap;
+typedef std::map<ScriptQuestionKey, FuzzyVariant, std::msl_port::less<ScriptQuestionKey>, std::allocator<ScriptCachePair> > ScriptCacheMap;
 typedef std::__tree<ScriptCachePair, ScriptCacheMap::value_compare, std::allocator<ScriptCachePair> > ScriptCacheTree;
 
 class ScriptQuestionCache : public nlSingleton<ScriptQuestionCache>

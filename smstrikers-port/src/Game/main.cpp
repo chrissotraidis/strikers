@@ -18,6 +18,9 @@
 #include <SDL3/SDL_video.h>
 #endif
 #include "port/overlay.h"
+// PORT: the host application's own interface above the game (mobile touch controls). Weak no-ops
+// unless the host defines them; see include/port/hostui.h for the guarantee about when they run.
+#include "port/hostui.h"
 extern "C" void PortDebugFrame(void);   // PORT: defined in Game.cpp
 #include "port/launch.h"
 #include "port/discord.h"
@@ -25,7 +28,14 @@ extern "C" void PortDebugFrame(void);   // PORT: defined in Game.cpp
 #include <aurora/main.h>   // #define main aurora_main
 #include <aurora/event.h>
 #include <stdio.h>   // PORT: snprintf
+#include <stdlib.h>  // PORT: exit, on the iOS quit path at the end of main
+#if defined(__APPLE__)
+#include <TargetConditionals.h>  // PORT: TARGET_OS_IPHONE, for the same
 #endif
+#endif
+#include "port/fatal.h"     // PORT: the box an unresolved disc still gets on a host with no importer
+#include "port/gamedata.h"  // PORT: whether the disc resolved, and the box it would have shown
+#include "port/hostui.h"    // PORT: the host's own importer, when it has one
 #include "port/benchmark.h"
 #include "port/audio.h"
 #include "port/determinism.h"
@@ -616,7 +626,9 @@ static void PortRequestManualShot()
     aurora_capture_frame(s_shotPath);
 }
 
-// PORT: keep the picture the shape of the window; idempotent, because everything below the generation test is skipped unless the shape actually moved.
+// PORT: keep the picture the shape of the window, and the render target the size the current scale,
+// aspect and window ask for. Idempotent: the aspect re-derivation only runs when the generation
+// moved, and the resize only when the target size actually changed.
 static void PortFollowWindowShape()
 {
     const AuroraWindowSize ws = aurora_window_size();
@@ -625,11 +637,15 @@ static void PortFollowWindowShape()
     // PORT: the automatic render scale follows the window height.
     PortFollowRenderScale(ws.height);
     PortSetWindowAspect(ws.width, ws.height);
-    if (PortAspectGeneration() == gen)
-        return;
+    if (PortAspectGeneration() != gen)
+        PortApplyAspectChange();
 
-    PortApplyAspectChange();
-    aurora_apply_frame_buffer_resize();
+    // PORT: whatever moved the render target -- the window, the aspect or the render scale -- the
+    // swapchain follows it here, at a point between frames. A scale change moves the target without
+    // moving the window, so Aurora's own window-resize path would never see it; the deferred
+    // FutureResize that set_frame_buffer_scale queues would land a frame late.
+    if (PortTakeRenderTargetChange())
+        aurora_apply_frame_buffer_resize();
 }
 
 static SDL_Window* s_portWindow;
@@ -695,6 +711,28 @@ static void PortPumpAuroraEvents()
 
 int main(int argc, char* argv[])
 {
+    // PORT: the disc. The port resolves it from a static initialiser (nlInitMemory -> DVDInit),
+    // which on a mobile host runs before that host's framework exists, so a disc it could not use
+    // was recorded rather than made fatal (include/port/gamedata.h). This is the first point in the
+    // run that is both after the framework and before any game code reads the disc, so it is where
+    // a host that takes the player's own disc in itself is given its chance: import, then resolve
+    // again from the state the first attempt started from. A host with no importer -- every desktop
+    // build -- falls straight through to the same box, with the same text, it always had.
+    if (!PortGameDataReady())
+    {
+        const char* title = PortGameDataErrorTitle();
+        const char* message = PortGameDataErrorMessage();
+        if (title[0] == '\0')
+            title = "Super Mario Strikers: game data not found";
+        if (message[0] == '\0')
+            message = "The game data was not found, and the disc has not been resolved yet.";
+
+        if (PortHostUIRunGameDataImport(title, message) != 0)
+            PortGameDataResolve();
+        if (!PortGameDataReady())
+            port_fatal(title, message);
+    }
+
     // PORT: strikers.ini -> environment, before anything reads one.
     {
         const int applied = PortConfigLoad();
@@ -787,6 +825,10 @@ int main(int argc, char* argv[])
             s_portWindow = info.window;
         }
 
+        // PORT: after the window and its aspect exist and before the first frame, which is the only
+        // moment a host interface can be placed above a renderer that is not yet presenting.
+        PortHostUIStart(info.window);
+
         // PORT: Aurora falls back to its preference order when the requested backend will not start.
         if (wantBackend != BACKEND_AUTO && info.backend != wantBackend)
         {
@@ -862,6 +904,9 @@ int main(int argc, char* argv[])
         PortBenchInputPumped();
         PortPumpAuroraEvents();
         PortUpdateSyntheticInput(s_portFrame);
+        // PORT: after the port has assembled this frame's pad, before the tasks read it, so a host
+        // interface's touch state and a synthetic press merge in the same place instead of racing.
+        PortHostUIFrame();
         PortDebugFrame();
         // PORT: ReturnToFE leaves the pause flag set, so it is a pause only while a match exists.
         PortDiscordUpdate(FrontEnd::m_bInPauseMenuState && g_pGame != NULL ? 1 : 0);
@@ -906,17 +951,25 @@ int main(int argc, char* argv[])
 
         PortMaybeRequestCapture();
         // PORT: STRIKERS_CAPTURE_EVERY, a shot every N frames, so a long run can be watched rather than sampled once.
+        // PORT: STRIKERS_CAPTURE_FROM / STRIKERS_CAPTURE_TO bound that to an inclusive frame window, so a dense
+        // burst (EVERY=1) can follow one transition without writing a file for every frame of the whole run.
         {
             static long s_everyN = -1;
+            static unsigned long s_from = 0;
+            static unsigned long s_to = 0;   // 0 means unbounded
             if (s_everyN < 0)
             {
                 const char* e = getenv("STRIKERS_CAPTURE_EVERY");
                 s_everyN = (e != NULL && *e != '\0') ? strtol(e, NULL, 10) : 0;
                 if (s_everyN < 0)
                     s_everyN = 0;
+                s_from = PortEnvU32("STRIKERS_CAPTURE_FROM", 0);
+                s_to = PortEnvU32("STRIKERS_CAPTURE_TO", 0);
             }
             if (s_everyN > 0 && s_portFrame > 0
-                && (s_portFrame % (unsigned long)s_everyN) == 0)
+                && (s_portFrame % (unsigned long)s_everyN) == 0
+                && s_portFrame >= s_from
+                && (s_to == 0 || s_portFrame <= s_to))
             {
                 PortRequestManualShot();
             }
@@ -943,7 +996,18 @@ int main(int argc, char* argv[])
     }
     PortDiscordShutdown();
     PortBenchReport();
+    // PORT: the loop is over, so a host interface must stop publishing input before the surface it
+    // is drawing over goes away.
+    PortHostUIStop();
     aurora_shutdown();
+    // PORT: on iOS this main() is not the process entry point. UIKit calls it from the scene
+    // delegate's postFinishLaunch, so returning from it leaves the application alive with no
+    // engine behind it -- a frozen window and a destroyed GPU device rather than a quit. The
+    // engine has already been shut down on the line above, so ending the process here is what
+    // "quit" means; on the other platforms returning from main does it by itself.
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+    exit(0);
+#endif
     return 0;
 #else
     for (;;)

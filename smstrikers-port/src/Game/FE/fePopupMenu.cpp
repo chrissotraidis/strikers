@@ -20,6 +20,18 @@
 #include "Game/SH/SHOptions.h"
 #include "NL/nlString.h"
 
+#include "port/input.h"   // PORT: STRIKERS_LOG_POPUP anchors its lines to the port frame counter
+#include <stdlib.h>
+
+// PORT: STRIKERS_LOG_POPUP dumps the popup's input gate once per frame. It is a diagnostic only --
+// nothing here changes what the popup does -- so a press the popup ignores can be told apart from
+// one the pad never delivered.
+static bool log_popup_enabled()
+{
+    static const int s_enabled = (getenv("STRIKERS_LOG_POPUP") != NULL) ? 1 : 0;
+    return s_enabled == 1;
+}
+
 char* optionNames[4] = { "Option1", "Option2", "Option3", "Option4" };
 
 // PORT: the Japanese build's offset suits its own popup layout, so it follows the language.
@@ -265,6 +277,21 @@ void FEPopupMenu::SceneCreated()
  */
 void FEPopupMenu::Update(float fDeltaT)
 {
+    if (log_popup_enabled())
+    {
+        const TLSlide* pSlide = (m_pFEPresentation != NULL) ? m_pFEPresentation->m_currentSlide : NULL;
+        OSReport("[popup] f=%lu created=%d disp=%d a1f=%d aa4=%d acc=%.3f opts=%d hi=%d t=%.3f s=%.3f d=%.3f ctrl=%d lock=%d allow=%d jpA=%d isA=%d\n",
+                 PortInputFrame(), (int)mMenuCreated, (int)mMenuDisplayed, (int)mUnknownA1F,
+                 (int)mUnknownAA4, (double)mAcceptDelayTime, mPopup.numOptions, mHighlightedOption,
+                 pSlide != NULL ? (double)pSlide->m_time : -1.0,
+                 pSlide != NULL ? (double)pSlide->m_start : -1.0,
+                 pSlide != NULL ? (double)pSlide->m_duration : -1.0, (int)mControlInput,
+                 g_pFEInput != NULL ? g_pFEInput->m_InputLockDepth : -1,
+                 g_pFEInput != NULL ? (int)g_pFEInput->m_bInputAllowed : -1,
+                 g_pFEInput != NULL ? (int)g_pFEInput->JustPressed(mControlInput, 0x100, false, NULL) : -1,
+                 g_pFEInput != NULL ? (int)g_pFEInput->IsPressed(mControlInput, 0x100, false, NULL) : -1);
+    }
+
     if (!mMenuCreated)
     {
         return;

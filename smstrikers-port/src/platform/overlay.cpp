@@ -93,6 +93,9 @@ int s_read;
 
 char s_scene[64] = "-";
 char s_stadium[64] = "-";
+// PORT: the number inside the label above. -1 before any scene, and the overlay's one place that
+// knows the label's shape, so a host reads the number rather than parsing a string written here.
+int s_sceneNumber = -1;
 float s_clock;
 int s_scoreHome, s_scoreAway;
 
@@ -392,8 +395,17 @@ int PortOverlayEnabled(void)
     return s_enabled;
 }
 
-void PortOverlaySetScene(const char* name) { copy_into(s_scene, sizeof(s_scene), name); }
+void PortOverlaySetScene(const char* name)
+{
+    copy_into(s_scene, sizeof(s_scene), name);
+    // The label carries the number first (BaseGameSceneManager formats it), and it is parsed with
+    // the format rather than by each reader of it.
+    s_sceneNumber = (name != nullptr && name[0] >= '0' && name[0] <= '9')
+                        ? (int)std::strtol(name, nullptr, 10)
+                        : -1;
+}
 const char* PortOverlaySceneName(void) { return s_scene; }
+int PortOverlaySceneNumber(void) { return s_sceneNumber; }
 void PortOverlaySetStadium(const char* name)
 {
     copy_into(s_stadium, sizeof(s_stadium), name);
