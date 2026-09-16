@@ -78,6 +78,9 @@ void PortHostUIFrame(void);
 
 void PortHostUIStop(void);
 
+// Bounded engine diagnostics. Hosts can persist these with their support report.
+void PortHostUIDiagnostic(const char* message);
+
 // Game data: the disc the port is going to play, for a host that has to import it.
 //
 // The port resolves its disc before the host's own framework exists -- from a static initialiser,

@@ -8,11 +8,14 @@
 #include "port/benchmark.h"
 #include "port/determinism.h"
 #include "port/host.h"
+#include "port/hostui.h"
 
 #ifdef STRIKERS_FFMPEG
 #include <libavcodec/avcodec.h>
 #include <libavutil/frame.h>
 #include <libavutil/pixfmt.h>
+#include <libavutil/error.h>
+#include <libavutil/pixdesc.h>
 #endif
 
 u32 OSGetTick(void);
@@ -32,6 +35,17 @@ static u32 s_pace_base;
 static unsigned long long s_pace_wall_base;
 static long s_pace_shown;
 static int s_pace_started;
+
+void port_thp_log_open(const char* name, u32 width, u32 height, float fps, u32 frames)
+{
+    char message[384];
+    // Asset basename only, never an imported user's full filesystem path.
+    const char* base = name != NULL ? strrchr(name, '/') : NULL;
+    base = base != NULL ? base + 1 : (name != NULL ? name : "?");
+    snprintf(message, sizeof message, "movie open %s: header %ux%u %.3f fps %u frames",
+             base, width, height, (double)fps, frames);
+    PortHostUIDiagnostic(message);
+}
 
 static void port_thp_pace_reset(void)
 {
@@ -117,6 +131,8 @@ static AVFrame* s_frame;
 static unsigned char* s_padded;
 static size_t s_paddedCap;
 static int s_reported;
+static unsigned long s_decode_index;
+static int s_reported_format;
 
 // GX I8: 8x4 tiles, 32 bytes each, tiles left to right then top to bottom, and within a tile four
 // rows of eight bytes.
@@ -162,8 +178,20 @@ static void report_once(const char* what)
     if (!s_reported)
     {
         s_reported = 1;
-        fprintf(stderr, "[port] THP video: %s; the movie will be skipped.\n", what);
+        char message[384];
+        snprintf(message, sizeof message, "THP video frame %lu: %s; the movie will be skipped.",
+                 s_decode_index, what);
+        PortHostUIDiagnostic(message);
     }
+}
+
+static void report_decoder_error(const char* operation, int rc)
+{
+    char reason[256];
+    char detail[AV_ERROR_MAX_STRING_SIZE];
+    av_strerror(rc, detail, sizeof detail);
+    snprintf(reason, sizeof reason, "%s failed (%d: %s)", operation, rc, detail);
+    report_once(reason);
 }
 
 static s32 decode_into(const void* frame, u32 size, void* tileY, void* tileU, void* tileV)
@@ -174,6 +202,7 @@ static s32 decode_into(const void* frame, u32 size, void* tileY, void* tileU, vo
 
     if (s_vctx == NULL || p == NULL)
     {
+        report_once("missing decoder or frame data");
         return -1;
     }
 
@@ -207,6 +236,7 @@ static s32 decode_into(const void* frame, u32 size, void* tileY, void* tileU, vo
 
     if (!copy_padded(frame, size))
     {
+        report_once("out of memory padding compressed frame");
         return -1;
     }
 
@@ -217,15 +247,28 @@ static s32 decode_into(const void* frame, u32 size, void* tileY, void* tileU, vo
     s_pkt->size = 0;
     if (rc < 0)
     {
-        report_once("libavcodec rejected the frame");
+        report_decoder_error("avcodec_send_packet", rc);
         return -1;
     }
 
     rc = avcodec_receive_frame(s_vctx, s_frame);
     if (rc < 0)
     {
-        report_once("libavcodec produced no picture for the frame");
+        report_decoder_error("avcodec_receive_frame", rc);
         return -1;
+    }
+
+    if (!s_reported_format)
+    {
+        char message[256];
+        const char* format = av_get_pix_fmt_name(s_frame->format);
+        snprintf(message, sizeof message,
+                 "THP first decoded frame %lu: %dx%d format %s (%d) strides %d,%d,%d",
+                 s_decode_index, s_frame->width, s_frame->height,
+                 format != NULL ? format : "unknown", s_frame->format,
+                 s_frame->linesize[0], s_frame->linesize[1], s_frame->linesize[2]);
+        PortHostUIDiagnostic(message);
+        s_reported_format = 1;
     }
 
     if (s_frame->format != AV_PIX_FMT_YUVJ420P && s_frame->format != AV_PIX_FMT_YUV420P)
@@ -262,6 +305,7 @@ static s32 decode_into(const void* frame, u32 size, void* tileY, void* tileU, vo
     }
 
     av_frame_unref(s_frame);
+    s_decode_index++;
     return 0;
 }
 
@@ -270,6 +314,9 @@ BOOL THPInit(void)
     const AVCodec* codec;
 
     port_thp_pace_reset();
+    s_decode_index = 0;
+    s_reported_format = 0;
+    s_reported = 0;
 
     if (port_thp_movies_disabled())
     {

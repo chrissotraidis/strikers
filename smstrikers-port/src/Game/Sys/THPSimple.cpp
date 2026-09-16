@@ -360,6 +360,9 @@ extern "C" int THPSimpleOpen(const char* fileName)
         }
     }
 
+    port_thp_log_open(fileName, SimpleControl.videoInfo.mXSize, SimpleControl.videoInfo.mYSize,
+                      SimpleControl.frameRate, SimpleControl.numFrames);
+
     ((THPSimpleControlWork*)&SimpleControl)->curOffset = ((THPSimpleControlWork*)&SimpleControl)->movieDataOffsets;
     ((THPSimpleControlWork*)&SimpleControl)->readSize = ((THPSimpleControlWork*)&SimpleControl)->firstFrameSize;
     ((THPSimpleControlWork*)&SimpleControl)->readIndex = 0;
