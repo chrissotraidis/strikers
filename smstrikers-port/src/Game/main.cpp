@@ -660,6 +660,18 @@ static void PortFollowDisplayRefresh()
                           aurora_present_waits_for_vblank() ? 1 : 0);
 }
 
+// Roughly the frame the loop is standing in for when it has nothing to draw. Read from the
+// limiter's own public read-back rather than from a constant here, so a run that is pacing to a
+// panel waits a panel frame and a run with no display to ask waits a field.
+static double port_idle_seconds()
+{
+    double limitHz = 0.0;
+    double displayHz = 0.0;
+    PortFrameLimitInfo(&limitHz, &displayHz, NULL, NULL);
+    const double hz = limitHz > 0.0 ? limitHz : (displayHz > 0.0 ? displayHz : 60.0);
+    return 1.0 / hz;
+}
+
 static void PortPumpAuroraEvents()
 {
     // PORT: polled rather than waited for; the event below is only the fast path.
@@ -913,8 +925,30 @@ int main(int argc, char* argv[])
 
         // PORT: timed, since the swapchain acquire blocks inside aurora_begin_frame under vsync.
         const unsigned long long acquireStart = port_monotonic_ns();
+        // The host's own interface is on screen and the game is behind it, or there is no surface
+        // to draw into. Either way this pass has no frame in it, and either way the pacing the loop
+        // relies on is missing: the frame limiter sleeps inside VIWaitForRetrace, which is inside
+        // the task tree both of these paths skip. Left alone the loop spins a core flat out for as
+        // long as the condition lasts -- which on a phone is heat, a starved user interface, and an
+        // app that only recovers when the surface comes back.
+        //
+        // The audio transport is fed on both paths rather than skipped with the frame:
+        // salPortNextBuffer advances MusyX by one 5 ms tick per buffer, so feeding it is what keeps
+        // music playing under a pause menu and what keeps the device from starving through a
+        // momentary loss of surface.
+        if (PortHostUIWantsPause())
+        {
+            PortAudioUpdate();
+            PortHostUIIdle(port_idle_seconds());
+            continue;
+        }
+
         if (!aurora_begin_frame())
+        {
+            PortAudioUpdate();
+            PortHostUIIdle(port_idle_seconds());
             continue;              // minimised or surface lost; nothing to draw
+        }
         const unsigned long long acquireNs = port_monotonic_ns() - acquireStart;
         PortBenchFrameBegin();
         PortBenchAddAcquire(acquireNs);

@@ -7,6 +7,7 @@
 
 #include "port/hostui.h"
 #include <stdio.h>
+#include <time.h>
 
 // These must lose to a host's own definitions; a strong symbol beats a weak one, and
 // `weak_definition` on Mach-O and `weak` on ELF are the same declaration in clang.
@@ -30,6 +31,26 @@ PORT_WEAK void PortHostUIStart(void* sdlWindow)
 
 PORT_WEAK void PortHostUIFrame(void)
 {
+}
+
+// A host with no interface of its own never wants the game held still.
+PORT_WEAK int PortHostUIWantsPause(void)
+{
+    return 0;
+}
+
+// The default is the sleep the loop would otherwise have taken. A host that shares this thread with
+// a user interface replaces it; nothing on the desktop does, and nothing there needs to.
+PORT_WEAK void PortHostUIIdle(double seconds)
+{
+    if (seconds <= 0.0)
+        return;
+    {
+        struct timespec request;
+        request.tv_sec = (time_t)seconds;
+        request.tv_nsec = (long)((seconds - (double)request.tv_sec) * 1000000000.0);
+        nanosleep(&request, NULL);
+    }
 }
 
 PORT_WEAK void PortHostUIStop(void)

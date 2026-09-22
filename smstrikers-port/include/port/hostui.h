@@ -76,6 +76,27 @@ int PortHostUIPollPad(PortHostPad* out);
 
 void PortHostUIFrame(void);
 
+// Nonzero while the host wants the game held still: its own interface is on screen and the frame
+// the game would draw is behind it. Asked once per frame, after PortHostUIFrame, and while it
+// answers nonzero the port does not advance the game and does not draw -- it keeps the audio
+// transport fed, so music carries on exactly as a pause menu leaves it, and hands the rest of the
+// frame to PortHostUIIdle below.
+//
+// This is the only way a host can stop the game. The frame loop is the game's clock -- one pass is
+// one VIWaitForRetrace is one game frame -- so a host that merely took time away from the loop
+// would be slowing the game down, not pausing it, and would still be drawing frames nobody can see.
+int PortHostUIWantsPause(void);
+
+// The port has no frame to draw and is about to wait: it is paused by the host, or the surface is
+// gone. `seconds` is roughly the frame it is standing in for. The default sleeps; a host whose user
+// interface shares this thread should spend the time running that interface instead, which is the
+// whole reason this is a hook rather than a sleep in the loop.
+//
+// It exists because the frame limiter cannot do this job. That limiter sleeps inside
+// VIWaitForRetrace, which is inside the game's task tree -- so every path that skips the tree also
+// skips the pacing, and the loop spins unpaced for as long as it has nothing to draw.
+void PortHostUIIdle(double seconds);
+
 void PortHostUIStop(void);
 
 // Bounded engine diagnostics. Hosts can persist these with their support report.
