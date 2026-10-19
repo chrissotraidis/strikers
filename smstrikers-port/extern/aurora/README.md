@@ -36,8 +36,6 @@ The GX compatibility layer is built on top of [WebGPU](https://www.w3.org/TR/web
 abstraction layer. WebGPU allows targeting all major platforms simultaneously with minimal overhead. The WebGPU
 implementation used is Chromium's [Dawn](https://dawn.googlesource.com/dawn/).
 
-![Screenshot](assets/screenshot.png)
-
 ### Building
 
 See [docs/building.md](docs/building.md) for build instructions, CMake integration, and configuration options.

@@ -1,7 +1,5 @@
 # Strikers - A Native PC Port of Super Mario Strikers
 
-![](media/strikers-gameplay.webp)
-
 *Requires game data from your own copy of Super Mario Strikers. No game assets are included.*
 
 Super Mario Strikers, rebuilt to run natively on Windows, Linux and macOS, with modern display support, configurable controls and a focus on performance across both powerful and low-power hardware.
